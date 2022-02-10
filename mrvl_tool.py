@@ -22,10 +22,6 @@ class ChunkWriteError(Exception):
     pass
 
 
-def bytes_eval(b):
-    return ast.literal_eval(b)
-
-
 parser = argparse.ArgumentParser(description='Tool for manipulation with Marvell SoC firmware files')
 parser.add_argument('-v', '--verbose', action='count', default=0, help='verbose level')
 subparsers = parser.add_subparsers(help='sub-command help')
@@ -44,9 +40,9 @@ def read_chunk():
         if args.verbose > 1:
             print('Read {} bytes of chunk header.'.format(struct.calcsize(chunk_hdr_format)))
         if args.verbose > 0:
-            print('Chunk Type: {}, Addr: {:#x}, Len: {}'.format(chunk_type, chunk_addr, chunk_len))
+            print('Read chunk Type: {}, Addr: {:#x}, Len: {}'.format(chunk_type, chunk_addr, chunk_len))
         if args.verbose > 1:
-            print('Chunk header CRC: {:#x}, calculated CRC: {:#x}'.format(chunk_hdr_crc, crc_hdr_calc))
+            print('Read chunk header CRC: {:#x}, calculated CRC: {:#x}'.format(chunk_hdr_crc, crc_hdr_calc))
         if chunk_type == 1:
             chunk_data = args.infile.read(chunk_len - struct.calcsize(chunk_data_crc_format))
             if args.verbose > 2:
@@ -73,13 +69,15 @@ def write_chunk(chunk_addr, chunk_data):
     chunk_len = 0 if chunk_data is None else len(chunk_data) + struct.calcsize(chunk_data_crc_format)
     chunk = struct.pack(chunk_hdr_format, chunk_type, chunk_addr, chunk_len)
     chunk += struct.pack(chunk_hdr_crc_format, marvell_crc32(chunk))
+    if args.verbose > 0:
+        print('Writing chunk Type: {}, Addr: {:#x}, Len: {}'.format(chunk_type, chunk_addr, chunk_len))
     if args.verbose > 1:
-        print('Created chunk header {}, len {} bytes'.format(chunk, len(chunk)))
+        print('Writing chunk header len {} bytes, data {}, '.format(len(chunk), chunk))
     if chunk_data is not None:
         chunk += chunk_data
         chunk += struct.pack(chunk_data_crc_format, marvell_crc32(chunk_data))
         if args.verbose > 2:
-            print('Created chunk data {}, len {} bytes'.format(chunk_data, len(chunk_data)))
+            print('Writing chunk len {} bytes, data {}'.format(len(chunk_data), chunk_data))
     written = args.outfile.write(chunk)
     if written != len(chunk):
         raise ChunkWriteError(chunk_addr)
@@ -175,6 +173,55 @@ parser_modify.add_argument('-d', '--data', type=lambda x: ast.literal_eval(x), a
                            help='data to modify as bytearray (use b\\\'\\\')')
 parser_modify.set_defaults(func=modify)
 
+
+def add():
+    chunk_counter = 0
+    output_bytes = 0
+    while True:
+        try:
+            chunk_addr, chunk_data = read_chunk()
+            if chunk_data is None:
+                break
+            chunk_range = range(chunk_addr, chunk_addr + len(chunk_data))
+            if args.address in chunk_range:
+                print('Error: address to add is within existing firmware address space. Use modify command instead')
+                break
+            chunk_counter += 1
+            output_bytes += write_chunk(chunk_addr, chunk_data)
+        except ChunkCrcError as e:
+            print('CRC32 Error in chunk {}, address {:#x}'.format(chunk_counter, e.args[0]))
+            break
+        except UnknownChunkTypeError as e:
+            print('Unknown chunk type {}'.format(e.args[0]))
+            break
+        except ChunkWriteError as e:
+            print('Error while writing chunk address {}'.format(e.args[0]))
+            break
+    chunk_addr = args.address
+    default_chunk_size = 0x200 - 4
+    while True:
+        chunk_data = args.file.read(default_chunk_size)
+        output_bytes += write_chunk(chunk_addr, chunk_data)
+        chunk_counter += 1
+        chunk_addr += len(chunk_data)
+        if len(chunk_data) < default_chunk_size:
+            break
+    output_bytes += write_chunk(0, None)
+    chunk_counter += 1
+    print('Number of chunks: {}'.format(chunk_counter))
+    print('Bytes written: {}'.format(output_bytes))
+
+
+parser_modify = subparsers.add_parser('add', help='add chunks to the firmware file')
+parser_modify.add_argument('infile', type=argparse.FileType('rb'))
+parser_modify.add_argument('outfile', type=argparse.FileType('wb'))
+parser_modify.add_argument('-a', '--address', type=lambda x: int(x, 0), required=True,
+                           help='address start to add (can use 0x for hex)')
+parser_modify.add_argument('-f', '--file', type=argparse.FileType('rb'), required=True,
+                           help='file containing binary data to add')
+parser_modify.set_defaults(func=add)
+
+
 args = parser.parse_args()
-print(args)
+# print(args)
 args.func()
